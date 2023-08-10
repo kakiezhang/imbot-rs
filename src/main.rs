@@ -12,6 +12,28 @@ use aes;
 use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use cbc;
 
+use config::*;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::time;
+
+fn load_config() -> Config {
+    let mut settings = Config::default();
+    settings.merge(Environment::new().prefix("APP")).unwrap();
+    settings.merge(File::with_name("config")).unwrap();
+    settings
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct Mates {
+    pub name: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct BotConfig {
+    pub mates: Mates,
+}
+
 #[derive(Debug, Deserialize)]
 struct IncomingMessage {
     msgtype: String,
@@ -31,7 +53,7 @@ struct OutgoingMessage {
 }
 
 #[get("/callback")]
-async fn get_callback(req: HttpRequest) -> impl Responder {
+async fn get_callback(data: web::Data<Arc<Mutex<Config>>>, req: HttpRequest) -> impl Responder {
     // 获取原始的查询字符串
     println!("Request query_string：{}", req.query_string());
 
@@ -40,10 +62,14 @@ async fn get_callback(req: HttpRequest) -> impl Responder {
 
     wxdecrypt();
 
+    let config = data.lock().unwrap();
+    let botconf: BotConfig = config.clone().try_into().unwrap();
+    println!("botconf: {:?}", botconf);
+
     HttpResponse::Ok().body("Hello, this is a GET request.")
 }
 
-fn aes_decrypt4(encrypted_data: &[u8], key: &[u8]) -> Vec<u8> {
+fn aes_decrypt(encrypted_data: &[u8], key: &[u8]) -> Vec<u8> {
     type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
     let mut iv: [u8; 16] = [0; 16];
@@ -134,7 +160,7 @@ fn wxdecrypt() {
     println!("aes_key: {:?}", &aes_key);
 
     // Decrypt the AES message using the AES key.
-    let rand_msg = aes_decrypt4(&aes_msg, &aes_key);
+    let rand_msg = aes_decrypt(&aes_msg, &aes_key);
 
     // Get the content by removing the first 16 random bytes.
     let content = &rand_msg[16..];
@@ -149,8 +175,9 @@ fn wxdecrypt() {
     // The remaining bytes after the message are assigned to `receiveid`.
     let receiveid = &content[(msg_len + 4)..];
 
-    println!("Message: {:?}", msg);
-    println!("Receiveid: {:?}", receiveid);
+    println!("Message: {:?}", std::str::from_utf8(&msg).unwrap());
+
+    println!("Receiveid: {:?}", std::str::from_utf8(&receiveid).unwrap());
 }
 
 #[post("/callback")]
@@ -174,8 +201,28 @@ async fn post_callback(incoming: web::Json<IncomingMessage>) -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| App::new().service(get_callback).service(post_callback))
-        .bind("127.0.0.1:9000")?
-        .run()
-        .await
+    let config = load_config();
+    let shared_config = Arc::new(Mutex::new(config.clone()));
+
+    let shared_config_clone = shared_config.clone();
+
+    tokio::spawn(async move {
+        loop {
+            time::sleep(Duration::from_secs(5)).await;
+
+            let new_config = load_config();
+            let mut locked_config = shared_config_clone.lock().unwrap();
+            *locked_config = new_config;
+        }
+    });
+
+    HttpServer::new(move || {
+        App::new()
+            .app_data(web::Data::new(shared_config.clone()))
+            .service(get_callback)
+            .service(post_callback)
+    })
+    .bind("127.0.0.1:9000")?
+    .run()
+    .await
 }
