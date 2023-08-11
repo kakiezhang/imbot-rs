@@ -19,6 +19,7 @@ use std::collections::HashMap;
 
 use chrono::{Datelike, Timelike, Utc};
 use config;
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time;
@@ -70,6 +71,17 @@ struct XmlRecvData {
     ToUserName: String,
     AgentID: String,
     Encrypt: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct XmlDecyptMsg {
+    ToUserName: String,
+    FromUserName: String,
+    CreateTime: i64,
+    MsgType: String,
+    Content: String,
+    MsgId: String,
+    AgentID: i32,
 }
 
 // 表单结构体
@@ -150,22 +162,23 @@ fn str_to_uint(slice: &[u8]) -> u32 {
 }
 
 #[derive(Debug)]
-struct WXWork<'a> {
+struct WXWork<'a, 'b> {
     sys: Sys,
     signature: &'a str,
     timestamps: &'a str,
     nonce: &'a str,
     msg_encrypt: &'a str,
+    _tag: PhantomData<&'b str>,
 }
 
-impl<'a> WXWork<'a> {
+impl<'a, 'b> WXWork<'a, 'b> {
     pub fn decode_aes_key(enc_aes_key: &str) -> Vec<u8> {
         let mut encoding_aes_key = String::from(enc_aes_key);
         encoding_aes_key.push('=');
         base64_decode(&encoding_aes_key)
     }
 
-    pub fn decrypt(&self) {
+    pub fn decrypt(&self) -> Result<String, &'b str> {
         // Sort the parameters in dictionary order and concatenate them into a single string.
         let mut params = vec![
             ("token", self.sys.token.as_str()),
@@ -195,8 +208,7 @@ impl<'a> WXWork<'a> {
         if signature_calculated == self.signature {
             println!("Signature is valid!");
         } else {
-            println!("Signature is invalid!");
-            return;
+            return Err("Signature is invalid!");
         }
 
         // Decode the base64-encoded AES message.
@@ -207,8 +219,7 @@ impl<'a> WXWork<'a> {
         // println!("aes_key: {:?}", &self.sys.aes_key);
 
         if self.sys.aes_key.is_none() {
-            println!("aes_key is none");
-            return;
+            return Err("aes_key is none");
         }
 
         // Decrypt the AES message using the AES key.
@@ -226,10 +237,14 @@ impl<'a> WXWork<'a> {
 
         // The remaining bytes after the message are assigned to `receiveid`.
         let receiveid = &content[(msg_len + 4)..];
-
-        println!("Message: {:?}", std::str::from_utf8(&msg).unwrap());
-
         println!("Receiveid: {:?}", std::str::from_utf8(&receiveid).unwrap());
+
+        // std::str::from_utf8(&msg).unwrap()
+
+        match String::from_utf8(msg.to_vec()) {
+            Ok(rs) => Ok(rs),
+            Err(_) => Err("msg data conv from vec to utf8-str failed"),
+        }
     }
 }
 
@@ -239,15 +254,15 @@ async fn post_callback(
     req: HttpRequest,
     query_str: String,
 ) -> impl Responder {
-    let xml = serde_xml_rs::from_str::<XmlRecvData>(&query_str);
-    if xml.is_err() {
-        HttpResponse::BadRequest().body("Failed to parse XML data");
+    let rd = serde_xml_rs::from_str::<XmlRecvData>(&query_str);
+    if rd.is_err() {
+        return HttpResponse::BadRequest().body("Failed to parse XmlRecvData");
     }
-    let xml = xml.unwrap();
+    let rd = rd.unwrap();
 
     let qs = serde_qs::from_str::<QueryParams>(req.query_string());
     if qs.is_err() {
-        HttpResponse::BadRequest().body("Error parsing query parameters");
+        return HttpResponse::BadRequest().body("Error parsing QueryParams");
     }
     let qs = qs.unwrap();
 
@@ -257,9 +272,22 @@ async fn post_callback(
         signature: &qs.msg_signature,
         timestamps: &qs.timestamp,
         nonce: &qs.nonce,
-        msg_encrypt: &xml.Encrypt,
+        msg_encrypt: &rd.Encrypt,
+        _tag: PhantomData::default(),
     };
-    wxw.decrypt();
+    let msg = wxw.decrypt();
+    if msg.is_err() {
+        return HttpResponse::BadRequest().body(msg.unwrap_err());
+    }
+    let msg = msg.unwrap();
+
+    let dm = serde_xml_rs::from_str::<XmlDecyptMsg>(&msg);
+    if dm.is_err() {
+        HttpResponse::BadRequest().body("Failed to parse XmlDecyptMsg");
+    }
+    let dm = dm.unwrap();
+
+    println!("dm: {:?}", dm);
 
     HttpResponse::Ok().body("Hello, this is a Post request.")
 }
