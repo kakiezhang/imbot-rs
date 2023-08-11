@@ -1430,6 +1430,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_qs"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0431a35568651e363364210c91983c1da5eb29404d9f0928b67d4ebcfa7d330c"
+dependencies = [
+ "percent-encoding",
+ "serde 1.0.181",
+ "thiserror",
+]
+
+[[package]]
 name = "serde_test"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1971,6 +1982,7 @@ dependencies = [
  "serde 1.0.181",
  "serde-xml-rs",
  "serde_json",
+ "serde_qs",
  "sha1",
  "tokio",
 ]

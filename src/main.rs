@@ -5,12 +5,15 @@ use base64::{
     engine::{self, general_purpose},
     Engine as _,
 };
+
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
+use serde_qs;
+use serde_xml_rs;
 
 use aes;
 use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use cbc;
+use sha1::{Digest, Sha1};
 
 use std::collections::HashMap;
 
@@ -30,7 +33,8 @@ fn load_config() -> BotConfig {
         .merge(config::Environment::new().prefix("APP"))
         .unwrap();
     settings.merge(config::File::with_name("config")).unwrap();
-    let botconf: BotConfig = settings.clone().try_into().unwrap();
+    let mut botconf: BotConfig = settings.clone().try_into().unwrap();
+    botconf.sys.aes_key = Some(WXWork::decode_aes_key(&botconf.sys.enc_aes_key));
     botconf
 }
 
@@ -39,9 +43,26 @@ pub struct Mates {
     pub name: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct Sys {
+    corp_id: String,
+    token: String,
+    enc_aes_key: String,
+    aes_key: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct BotConfig {
     pub mates: Mates,
+    pub sys: Sys,
+}
+
+#[derive(Debug, Deserialize)]
+struct QueryParams {
+    msg_signature: String,
+    timestamp: String,
+    nonce: String,
+    echostr: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,7 +105,7 @@ async fn get_callback(data: web::Data<Arc<Mutex<BotConfig>>>, req: HttpRequest) 
     // 打印所有的request header
     println!("Request Headers：{:?}", req.headers());
 
-    wxdecrypt();
+    // wxdecrypt();
 
     let config = data.lock().unwrap();
     println!("botconf: {:?}", config);
@@ -128,98 +149,119 @@ fn str_to_uint(slice: &[u8]) -> u32 {
         | (slice[3] as u32)
 }
 
-fn wxdecrypt() {
-    let corp_id = "wx5823bf96d3bd56c7";
-    let token = "QDG6eK";
-    let mut encoding_aes_key = String::from("jWmYm7qr5nMoAUwZRjGtBxmz3KA1tkAj3ykkR6q2B2C");
+#[derive(Debug)]
+struct WXWork<'a> {
+    sys: Sys,
+    signature: &'a str,
+    timestamps: &'a str,
+    nonce: &'a str,
+    msg_encrypt: &'a str,
+}
 
-    encoding_aes_key.push('=');
-    let aes_key = base64_decode(&encoding_aes_key);
-
-    let signature = "477715d11cdb4164915debcba66cb864d751f3e6";
-    let timestamps = "1409659813";
-    let nonce = "1372623149";
-    let msg_encrypt = "RypEvHKD8QQKFhvQ6QleEB4J58tiPdvo+rtK1I9qca6aM/wvqnLSV5zEPeusUiX5L5X/0lWfrf0QADHHhGd3QczcdCUpj911L3vg3W/sYYvuJTs3TUUkSUXxaccAS0qhxchrRYt66wiSpGLYL42aM6A8dTT+6k4aSknmPj48kzJs8qLjvd4Xgpue06DOdnLxAUHzM6+kDZ+HMZfJYuR+LtwGc2hgf5gsijff0ekUNXZiqATP7PF5mZxZ3Izoun1s4zG4LUMnvw2r+KqCKIw+3IQH03v+BCA9nMELNqbSf6tiWSrXJB3LAVGUcallcrw8V2t9EL4EhzJWrQUax5wLVMNS0+rUPA3k22Ncx4XXZS9o0MBH27Bo6BpNelZpS+/uh9KsNlY6bHCmJU9p8g7m3fVKn28H3KDYA5Pl/T8Z1ptDAVe0lXdQ2YoyyH2uyPIGHBZZIs2pDBS8R07+qN+E7Q==";
-
-    // Sort the parameters in dictionary order and concatenate them into a single string.
-    let mut params = vec![
-        ("token", token),
-        ("timestamp", timestamps),
-        ("nonce", nonce),
-        ("msg_encrypt", msg_encrypt),
-    ];
-    params.sort_by(|a, b| a.1.cmp(b.1));
-    let sorted_params: String = params
-        .iter()
-        .map(|(key, value)| format!("{}", value))
-        .collect();
-
-    println!("sorted_params: {}", sorted_params);
-
-    // Calculate the SHA1 hash of the sorted parameters string.
-    let mut hasher = Sha1::new();
-    hasher.update(sorted_params.as_bytes());
-    let sha1_hash = hasher.finalize();
-    println!("sha1_hash: {:?}", sha1_hash);
-
-    // Convert the SHA1 hash to a hexadecimal string.
-    let signature_calculated = format!("{:x}", sha1_hash);
-    println!("signature_calculated: {}", signature_calculated);
-
-    // Compare the calculated signature with the provided signature.
-    if signature_calculated == signature {
-        println!("Signature is valid!");
-    } else {
-        println!("Signature is invalid!");
-        return;
+impl<'a> WXWork<'a> {
+    pub fn decode_aes_key(enc_aes_key: &str) -> Vec<u8> {
+        let mut encoding_aes_key = String::from(enc_aes_key);
+        encoding_aes_key.push('=');
+        base64_decode(&encoding_aes_key)
     }
 
-    // Decode the base64-encoded AES message.
-    // let aes_msg = base64::decode(msg_encrypt).unwrap();
-    let aes_msg = base64_decode(msg_encrypt);
-    println!("aes_msg: {:?}", aes_msg);
-    println!("aes_msg_cnt: {:?}", aes_msg.len());
+    pub fn decrypt(&self) {
+        // Sort the parameters in dictionary order and concatenate them into a single string.
+        let mut params = vec![
+            ("token", self.sys.token.as_str()),
+            ("timestamp", self.timestamps),
+            ("nonce", self.nonce),
+            ("msg_encrypt", self.msg_encrypt),
+        ];
+        params.sort_by(|a, b| a.1.cmp(b.1));
+        let sorted_params: String = params
+            .iter()
+            .map(|(key, value)| format!("{}", value))
+            .collect();
 
-    println!("aes_key: {:?}", &aes_key);
+        println!("sorted_params: {}", sorted_params);
 
-    // Decrypt the AES message using the AES key.
-    let rand_msg = aes_decrypt(&aes_msg, &aes_key);
+        // Calculate the SHA1 hash of the sorted parameters string.
+        let mut hasher = Sha1::new();
+        hasher.update(sorted_params.as_bytes());
+        let sha1_hash = hasher.finalize();
+        println!("sha1_hash: {:?}", sha1_hash);
 
-    // Get the content by removing the first 16 random bytes.
-    let content = &rand_msg[16..];
+        // Convert the SHA1 hash to a hexadecimal string.
+        let signature_calculated = format!("{:x}", sha1_hash);
+        println!("signature_calculated: {}", signature_calculated);
 
-    // Get the message length (4 bytes) and convert it to an unsigned integer.
-    let msg_len_bytes = &content[..4];
-    let msg_len = str_to_uint(msg_len_bytes) as usize;
+        // Compare the calculated signature with the provided signature.
+        if signature_calculated == self.signature {
+            println!("Signature is valid!");
+        } else {
+            println!("Signature is invalid!");
+            return;
+        }
 
-    // Extract the message (from index 4 to msg_len+4).
-    let msg = &content[4..(msg_len + 4)];
+        // Decode the base64-encoded AES message.
+        let aes_msg = base64_decode(self.msg_encrypt);
+        println!("aes_msg: {:?}", aes_msg);
+        println!("aes_msg_cnt: {:?}", aes_msg.len());
 
-    // The remaining bytes after the message are assigned to `receiveid`.
-    let receiveid = &content[(msg_len + 4)..];
+        // println!("aes_key: {:?}", &self.sys.aes_key);
 
-    println!("Message: {:?}", std::str::from_utf8(&msg).unwrap());
+        if self.sys.aes_key.is_none() {
+            println!("aes_key is none");
+            return;
+        }
 
-    println!("Receiveid: {:?}", std::str::from_utf8(&receiveid).unwrap());
+        // Decrypt the AES message using the AES key.
+        let rand_msg = aes_decrypt(&aes_msg, &self.sys.aes_key.clone().unwrap());
+
+        // Get the content by removing the first 16 random bytes.
+        let content = &rand_msg[16..];
+
+        // Get the message length (4 bytes) and convert it to an unsigned integer.
+        let msg_len_bytes = &content[..4];
+        let msg_len = str_to_uint(msg_len_bytes) as usize;
+
+        // Extract the message (from index 4 to msg_len+4).
+        let msg = &content[4..(msg_len + 4)];
+
+        // The remaining bytes after the message are assigned to `receiveid`.
+        let receiveid = &content[(msg_len + 4)..];
+
+        println!("Message: {:?}", std::str::from_utf8(&msg).unwrap());
+
+        println!("Receiveid: {:?}", std::str::from_utf8(&receiveid).unwrap());
+    }
 }
 
 #[post("/callback")]
-async fn post_callback(incoming: web::Json<IncomingMessage>) -> impl Responder {
-    match incoming.msgtype.as_str() {
-        "text" => {
-            // 处理文本消息
-            let reply_content = format!("你发送了：{}", incoming.text.as_ref().unwrap().content);
-            let reply_message = OutgoingMessage {
-                msgtype: "text".to_string(),
-                text: MessageContent {
-                    content: reply_content,
-                },
-            };
-            HttpResponse::Ok().json(reply_message)
-        }
-        // 可以根据需求处理其他类型的消息
-        _ => HttpResponse::BadRequest().body("Unsupported message type"),
+async fn post_callback(
+    data: web::Data<Arc<Mutex<BotConfig>>>,
+    req: HttpRequest,
+    query_str: String,
+) -> impl Responder {
+    let xml = serde_xml_rs::from_str::<XmlRecvData>(&query_str);
+    if xml.is_err() {
+        HttpResponse::BadRequest().body("Failed to parse XML data");
     }
+    let xml = xml.unwrap();
+
+    let qs = serde_qs::from_str::<QueryParams>(req.query_string());
+    if qs.is_err() {
+        HttpResponse::BadRequest().body("Error parsing query parameters");
+    }
+    let qs = qs.unwrap();
+
+    let config = data.lock().unwrap();
+    let wxw = WXWork {
+        sys: config.sys.clone(),
+        signature: &qs.msg_signature,
+        timestamps: &qs.timestamp,
+        nonce: &qs.nonce,
+        msg_encrypt: &xml.Encrypt,
+    };
+    wxw.decrypt();
+
+    HttpResponse::Ok().body("Hello, this is a Post request.")
 }
 
 #[actix_web::main]
