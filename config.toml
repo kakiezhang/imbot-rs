@@ -1,2 +1,6 @@
 [mates]
-name = ["Bob", "Mary", "Tony", "Allen", "Malong"]
+name = ["Bob", "Mary", "Tony", "Allen", "Malong", "Ronaldo"]
+[sys]
+corp_id = "wx5823bf96d3bd56c7"
+token = "QDG6eK"
+enc_aes_key = "jWmYm7qr5nMoAUwZRjGtBxmz3KA1tkAj3ykkR6q2B2C"

@@ -12,16 +12,26 @@ use aes;
 use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
 use cbc;
 
-use config::*;
+use std::collections::HashMap;
+
+use chrono::{Datelike, Timelike, Utc};
+use config;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time;
 
-fn load_config() -> Config {
-    let mut settings = Config::default();
-    settings.merge(Environment::new().prefix("APP")).unwrap();
-    settings.merge(File::with_name("config")).unwrap();
+// 定义全局变量
+type MatesData = Arc<Mutex<HashMap<String, HashMap<String, String>>>>;
+static DATE_FORMAT: &'static str = "%Y-%m-%d";
+
+fn load_config() -> BotConfig {
+    let mut settings = config::Config::default();
     settings
+        .merge(config::Environment::new().prefix("APP"))
+        .unwrap();
+    settings.merge(config::File::with_name("config")).unwrap();
+    let botconf: BotConfig = settings.clone().try_into().unwrap();
+    botconf
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -32,6 +42,20 @@ pub struct Mates {
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct BotConfig {
     pub mates: Mates,
+}
+
+#[derive(Debug, Deserialize)]
+struct XmlRecvData {
+    ToUserName: String,
+    AgentID: String,
+    Encrypt: String,
+}
+
+// 表单结构体
+#[derive(Debug, Deserialize)]
+struct GreetMessage {
+    name: String,
+    content: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,7 +77,7 @@ struct OutgoingMessage {
 }
 
 #[get("/callback")]
-async fn get_callback(data: web::Data<Arc<Mutex<Config>>>, req: HttpRequest) -> impl Responder {
+async fn get_callback(data: web::Data<Arc<Mutex<BotConfig>>>, req: HttpRequest) -> impl Responder {
     // 获取原始的查询字符串
     println!("Request query_string：{}", req.query_string());
 
@@ -63,8 +87,7 @@ async fn get_callback(data: web::Data<Arc<Mutex<Config>>>, req: HttpRequest) -> 
     wxdecrypt();
 
     let config = data.lock().unwrap();
-    let botconf: BotConfig = config.clone().try_into().unwrap();
-    println!("botconf: {:?}", botconf);
+    println!("botconf: {:?}", config);
 
     HttpResponse::Ok().body("Hello, this is a GET request.")
 }
@@ -201,24 +224,25 @@ async fn post_callback(incoming: web::Json<IncomingMessage>) -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let config = load_config();
-    let shared_config = Arc::new(Mutex::new(config.clone()));
+    let mates: MatesData = Arc::new(Mutex::new(HashMap::new()));
 
+    let config = load_config();
+    let shared_config = Arc::new(Mutex::new(config));
     let shared_config_clone = shared_config.clone();
 
     tokio::spawn(async move {
         loop {
             time::sleep(Duration::from_secs(5)).await;
 
-            let new_config = load_config();
             let mut locked_config = shared_config_clone.lock().unwrap();
-            *locked_config = new_config;
+            *locked_config = load_config();
         }
     });
 
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(shared_config.clone()))
+            .app_data(web::Data::new(mates.clone()))
             .service(get_callback)
             .service(post_callback)
     })
