@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time;
 
-type MatesPost = Arc<Mutex<HashMap<String, HashMap<String, String>>>>;
+type MatesPost = HashMap<String, HashMap<String, String>>;
 static DATE_FORMAT: &'static str = "%Y-%m-%d";
 
 fn load_config() -> BotConfig {
@@ -43,6 +43,16 @@ pub struct Mates {
     pub name: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct Admin {
+    pub name: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct Web {
+    port: i32,
+}
+
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct Sys {
     corp_id: String,
@@ -53,8 +63,10 @@ pub struct Sys {
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct BotConfig {
-    pub mates: Mates,
+    pub web: Web,
     pub sys: Sys,
+    pub mates: Mates,
+    pub adm: Admin,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,31 +93,6 @@ struct XmlDecyptMsg {
     Content: String,
     MsgId: String,
     AgentID: i32,
-}
-
-// 表单结构体
-#[derive(Debug, Deserialize)]
-struct GreetMessage {
-    name: String,
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct IncomingMessage {
-    msgtype: String,
-    text: Option<MessageContent>,
-    // 在这里可以添加其他消息类型的字段
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct MessageContent {
-    content: String,
-}
-
-#[derive(Debug, Serialize)]
-struct OutgoingMessage {
-    msgtype: String,
-    text: MessageContent,
 }
 
 #[get("/callback")]
@@ -250,7 +237,7 @@ impl<'a, 'b> WXWork<'a, 'b> {
 #[post("/callback")]
 async fn post_callback(
     botconf: web::Data<Arc<Mutex<BotConfig>>>,
-    mates_post: web::Data<MatesPost>,
+    mates_post: web::Data<Arc<Mutex<MatesPost>>>,
     req: HttpRequest,
     query_str: String,
 ) -> impl Responder {
@@ -299,11 +286,24 @@ async fn post_callback(
         _ => {
             return HttpResponse::BadRequest().body("Unknown decrypt MsgType");
         }
-    }
+    };
 
     let mut mates_post = mates_post.lock().unwrap();
 
     let date = Utc::now().format(DATE_FORMAT).to_string();
+
+    if botconf.adm.name.contains(mate_name) {
+        if content.contains(&date) {
+            match get_posts(&date, &mates_post) {
+                Ok(res) => {
+                    HttpResponse::Ok().body(res);
+                }
+                Err(e) => {
+                    return HttpResponse::BadRequest().body(e);
+                }
+            };
+        }
+    }
 
     mates_post
         .entry(date)
@@ -313,11 +313,25 @@ async fn post_callback(
     HttpResponse::Ok().body("Hello, this is a Post request.")
 }
 
+fn get_posts(date: &str, mates_post: &MatesPost) -> Result<String, &'static str> {
+    if let Some(mate_contents) = mates_post.get(date) {
+        let mut result = String::new();
+        for (mate_name, content) in mate_contents {
+            result.push_str(&format!("{} - {}: {}\n", date, mate_name, content));
+        }
+        Ok(result)
+    } else {
+        Err("No mates found for the given date.")
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let mates_post: MatesPost = Arc::new(Mutex::new(HashMap::new()));
+    let mates_post: MatesPost = HashMap::new();
+    let mates_post = Arc::new(Mutex::new(mates_post));
 
     let config = load_config();
+    let webport = config.web.port;
     let shared_config = Arc::new(Mutex::new(config));
     let shared_config_clone = shared_config.clone();
 
@@ -337,7 +351,7 @@ async fn main() -> std::io::Result<()> {
             .service(get_callback)
             .service(post_callback)
     })
-    .bind("127.0.0.1:9000")?
+    .bind(format!("0.0.0.0:{:?}", webport))?
     .run()
     .await
 }
