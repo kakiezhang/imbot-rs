@@ -17,7 +17,7 @@ use sha1::{Digest, Sha1};
 
 use std::collections::HashMap;
 
-use chrono::{Datelike, Timelike, Utc};
+use chrono;
 use config;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
@@ -290,7 +290,7 @@ async fn post_callback(
 
     let mut mates_post = mates_post.lock().unwrap();
 
-    let date = Utc::now().format(DATE_FORMAT).to_string();
+    let date = chrono::Local::now().format(DATE_FORMAT).to_string();
 
     if botconf.adm.name.contains(mate_name) {
         if content.contains(&date) {
