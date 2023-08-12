@@ -24,8 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time;
 
-// 定义全局变量
-type MatesData = Arc<Mutex<HashMap<String, HashMap<String, String>>>>;
+type MatesPost = Arc<Mutex<HashMap<String, HashMap<String, String>>>>;
 static DATE_FORMAT: &'static str = "%Y-%m-%d";
 
 fn load_config() -> BotConfig {
@@ -250,7 +249,8 @@ impl<'a, 'b> WXWork<'a, 'b> {
 
 #[post("/callback")]
 async fn post_callback(
-    data: web::Data<Arc<Mutex<BotConfig>>>,
+    botconf: web::Data<Arc<Mutex<BotConfig>>>,
+    mates_post: web::Data<MatesPost>,
     req: HttpRequest,
     query_str: String,
 ) -> impl Responder {
@@ -266,9 +266,9 @@ async fn post_callback(
     }
     let qs = qs.unwrap();
 
-    let config = data.lock().unwrap();
+    let botconf = botconf.lock().unwrap();
     let wxw = WXWork {
-        sys: config.sys.clone(),
+        sys: botconf.sys.clone(),
         signature: &qs.msg_signature,
         timestamps: &qs.timestamp,
         nonce: &qs.nonce,
@@ -283,18 +283,39 @@ async fn post_callback(
 
     let dm = serde_xml_rs::from_str::<XmlDecyptMsg>(&msg);
     if dm.is_err() {
-        HttpResponse::BadRequest().body("Failed to parse XmlDecyptMsg");
+        return HttpResponse::BadRequest().body("Failed to parse XmlDecyptMsg");
     }
     let dm = dm.unwrap();
 
     println!("dm: {:?}", dm);
+
+    let mate_name;
+    let content;
+    match dm.MsgType.as_str() {
+        "text" => {
+            mate_name = &dm.FromUserName;
+            content = &dm.Content;
+        }
+        _ => {
+            return HttpResponse::BadRequest().body("Unknown decrypt MsgType");
+        }
+    }
+
+    let mut mates_post = mates_post.lock().unwrap();
+
+    let date = Utc::now().format(DATE_FORMAT).to_string();
+
+    mates_post
+        .entry(date)
+        .or_insert_with(HashMap::new)
+        .insert(mate_name.to_string(), content.to_string());
 
     HttpResponse::Ok().body("Hello, this is a Post request.")
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let mates: MatesData = Arc::new(Mutex::new(HashMap::new()));
+    let mates_post: MatesPost = Arc::new(Mutex::new(HashMap::new()));
 
     let config = load_config();
     let shared_config = Arc::new(Mutex::new(config));
@@ -312,7 +333,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(shared_config.clone()))
-            .app_data(web::Data::new(mates.clone()))
+            .app_data(web::Data::new(mates_post.clone()))
             .service(get_callback)
             .service(post_callback)
     })
