@@ -5,6 +5,8 @@ corp_id = "wx5823bf96d3bd56c7"
 token = "QDG6eK"
 enc_aes_key = "jWmYm7qr5nMoAUwZRjGtBxmz3KA1tkAj3ykkR6q2B2C"
 [mates]
-name = ["Bob", "Mary", "Tony", "Allen", "Malong", "Ronaldo"]
+# name = ["Bob", "Mary", "Tony", "Allen", "Malong", "Ronaldo"]
+name = ["mycreate"]
+department = "tech.backend"
 [adm]
 name = ["Bob"]

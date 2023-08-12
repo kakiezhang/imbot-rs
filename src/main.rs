@@ -25,7 +25,7 @@ use std::time::Duration;
 use tokio::time;
 
 type MatesPost = HashMap<String, HashMap<String, String>>;
-static DATE_FORMAT: &'static str = "%Y-%m-%d";
+static DATE_FORMAT: &'static str = "%Y%m%d";
 
 fn load_config() -> BotConfig {
     let mut settings = config::Config::default();
@@ -41,6 +41,7 @@ fn load_config() -> BotConfig {
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Mates {
     pub name: Vec<String>,
+    pub department: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -96,19 +97,36 @@ struct XmlDecyptMsg {
 }
 
 #[get("/callback")]
-async fn get_callback(data: web::Data<Arc<Mutex<BotConfig>>>, req: HttpRequest) -> impl Responder {
-    // 获取原始的查询字符串
-    println!("Request query_string：{}", req.query_string());
+async fn get_callback(
+    botconf: web::Data<Arc<Mutex<BotConfig>>>,
+    req: HttpRequest,
+) -> impl Responder {
+    let qs = serde_qs::from_str::<QueryParams>(req.query_string());
+    if qs.is_err() {
+        return HttpResponse::BadRequest().body("Error parsing QueryParams");
+    }
+    let qs = qs.unwrap();
 
-    // 打印所有的request header
-    println!("Request Headers：{:?}", req.headers());
+    if qs.echostr.is_none() {
+        return HttpResponse::BadRequest().body("Error parsing echostr when validate url");
+    }
 
-    // wxdecrypt();
+    let botconf = botconf.lock().unwrap();
+    let wxw = WXWork {
+        sys: botconf.sys.clone(),
+        signature: &qs.msg_signature,
+        timestamps: &qs.timestamp,
+        nonce: &qs.nonce,
+        msg_encrypt: &qs.echostr.unwrap(),
+        _tag: PhantomData::default(),
+    };
+    let msg = wxw.decrypt();
+    if msg.is_err() {
+        return HttpResponse::BadRequest().body(msg.unwrap_err());
+    }
+    let msg = msg.unwrap();
 
-    let config = data.lock().unwrap();
-    println!("botconf: {:?}", config);
-
-    HttpResponse::Ok().body("Hello, this is a GET request.")
+    HttpResponse::Ok().body(msg)
 }
 
 fn aes_decrypt(encrypted_data: &[u8], key: &[u8]) -> Vec<u8> {
@@ -294,9 +312,10 @@ async fn post_callback(
 
     if botconf.adm.name.contains(mate_name) {
         if content.contains(&date) {
-            match get_posts(&date, &mates_post) {
+            match get_posts(&botconf.mates.department, &date, &mates_post) {
                 Ok(res) => {
-                    HttpResponse::Ok().body(res);
+                    // TODO need to encrypt res to xml
+                    return HttpResponse::Ok().body(res);
                 }
                 Err(e) => {
                     return HttpResponse::BadRequest().body(e);
@@ -305,20 +324,37 @@ async fn post_callback(
         }
     }
 
+    if !botconf.mates.name.contains(mate_name) {
+        return HttpResponse::BadRequest().body(format!("{} is not our mates", mate_name));
+    }
+
     mates_post
-        .entry(date)
+        .entry(date.clone())
         .or_insert_with(HashMap::new)
         .insert(mate_name.to_string(), content.to_string());
 
-    HttpResponse::Ok().body("Hello, this is a Post request.")
+    if mates_post.get(&date).unwrap().len() == botconf.mates.name.len() {
+        match get_posts(&botconf.mates.department, &date, &mates_post) {
+            Ok(res) => {
+                // TODO need to encrypt res to xml
+                return HttpResponse::Ok().body(res);
+            }
+            Err(e) => {
+                return HttpResponse::BadRequest().body(e);
+            }
+        };
+    }
+
+    HttpResponse::Ok().body(format!("Thank you, {}", mate_name))
 }
 
-fn get_posts(date: &str, mates_post: &MatesPost) -> Result<String, &'static str> {
+fn get_posts(department: &str, date: &str, mates_post: &MatesPost) -> Result<String, &'static str> {
     if let Some(mate_contents) = mates_post.get(date) {
         let mut result = String::new();
         for (mate_name, content) in mate_contents {
-            result.push_str(&format!("{} - {}: {}\n", date, mate_name, content));
+            result.push_str(&format!("\n{}: \n\n{}\n", mate_name, content));
         }
+        result.insert_str(0, &format!("# {}@{}\n", department, date));
         Ok(result)
     } else {
         Err("No mates found for the given date.")
