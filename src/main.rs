@@ -11,14 +11,16 @@ use serde_qs;
 use serde_xml_rs;
 
 use aes;
-use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
+use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use cbc;
 use sha1::{Digest, Sha1};
 
 use std::collections::HashMap;
 
+use byteorder::{BigEndian, WriteBytesExt};
 use chrono;
 use config;
+use rand::Rng;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,6 +28,7 @@ use tokio::time;
 
 type MatesPost = HashMap<String, HashMap<String, String>>;
 static DATE_FORMAT: &'static str = "%Y%m%d";
+const LETTER_BYTES: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 fn load_config() -> BotConfig {
     let mut settings = config::Config::default();
@@ -129,6 +132,20 @@ async fn get_callback(
     HttpResponse::Ok().body(msg)
 }
 
+fn aes_encrypt(plaintext: &[u8], key: &[u8]) -> Vec<u8> {
+    type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+
+    let mut iv: [u8; 16] = [0; 16];
+    iv.copy_from_slice(&key[..16]);
+
+    let mut buf = vec![0u8; plaintext.len()];
+
+    let ciphertext = Aes256CbcEnc::new(key.into(), &iv.into())
+        .encrypt_padded_b2b_mut::<NoPadding>(&plaintext, &mut buf)
+        .unwrap();
+    ciphertext.to_vec()
+}
+
 fn aes_decrypt(encrypted_data: &[u8], key: &[u8]) -> Vec<u8> {
     type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
@@ -141,10 +158,30 @@ fn aes_decrypt(encrypted_data: &[u8], key: &[u8]) -> Vec<u8> {
     println!("iv: {:?}", iv);
     println!("encrypted_data: {:?}", encrypted_data);
 
-    let pt = Aes256CbcDec::new(key.into(), &iv.into())
+    let plaintext = Aes256CbcDec::new(key.into(), &iv.into())
         .decrypt_padded_b2b_mut::<NoPadding>(&encrypted_data, &mut buf)
         .unwrap();
-    pt.to_vec()
+    plaintext.to_vec()
+}
+
+fn pkcs7_unpadding(mut plaintext: Vec<u8>, block_size: usize) -> Result<Vec<u8>, &'static str> {
+    let plaintext_len = plaintext.len();
+
+    if plaintext.is_empty() || plaintext_len == 0 {
+        return Err("pKCS7Unpadding error nil or zero");
+    }
+
+    if plaintext_len % block_size != 0 {
+        return Err("pKCS7Unpadding text not a multiple of the block size");
+    }
+
+    let padding_len = plaintext[plaintext_len - 1] as usize;
+    if padding_len > block_size || padding_len == 0 {
+        return Err("pKCS7Unpadding invalid padding length");
+    }
+
+    plaintext.truncate(plaintext_len - padding_len);
+    Ok(plaintext)
 }
 
 fn base64_decode(s: &str) -> Vec<u8> {
@@ -163,6 +200,18 @@ fn str_to_uint(slice: &[u8]) -> u32 {
         | ((slice[1] as u32) << 16)
         | ((slice[2] as u32) << 8)
         | (slice[3] as u32)
+}
+
+fn rand_str(n: usize) -> String {
+    let mut rng = rand::thread_rng();
+
+    let mut result = Vec::with_capacity(n);
+    for _ in 0..n {
+        let idx = rng.gen_range(0..LETTER_BYTES.len());
+        result.push(LETTER_BYTES[idx]);
+    }
+
+    String::from_utf8(result).unwrap()
 }
 
 #[derive(Debug)]
@@ -227,7 +276,17 @@ impl<'a, 'b> WXWork<'a, 'b> {
         }
 
         // Decrypt the AES message using the AES key.
-        let rand_msg = aes_decrypt(&aes_msg, &self.sys.aes_key.clone().unwrap());
+        let mut rand_msg = aes_decrypt(&aes_msg, &self.sys.aes_key.clone().unwrap());
+
+        let blocksize = 32;
+        match pkcs7_unpadding(rand_msg, blocksize) {
+            Ok(res) => {
+                rand_msg = res;
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        };
 
         // Get the content by removing the first 16 random bytes.
         let content = &rand_msg[16..];
@@ -250,6 +309,24 @@ impl<'a, 'b> WXWork<'a, 'b> {
             Err(_) => Err("msg data conv from vec to utf8-str failed"),
         }
     }
+
+    // pub fn encrypt(&self, reply_msg: String, ts: String, nonce: String) {
+    //     let rand_str = rand_str(16);
+
+    //     let mut buffer = Vec::new();
+    //     buffer.extend_from_slice(rand_str.as_bytes());
+
+    //     let mut msg_len_buf = vec![0; 4];
+    //     (&mut msg_len_buf[..])
+    //         .write_u32::<BigEndian>(reply_msg.len() as u32)
+    //         .unwrap();
+    //     buffer.extend_from_slice(&msg_len_buf);
+
+    //     buffer.extend_from_slice(reply_msg.as_bytes());
+    //     buffer.extend_from_slice(self.receiver_id.as_bytes());
+
+    //     // buffer
+    // }
 }
 
 #[post("/callback")]
