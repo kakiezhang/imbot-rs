@@ -103,6 +103,80 @@ struct XmlDecyptMsg {
     AgentID: i32,
 }
 
+#[derive(Debug, Serialize)]
+struct CDATA {
+    #[serde(rename = "$value")]
+    value: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WXBizMsg4Send {
+    #[serde(rename = "xml")]
+    xml_name: (),
+    #[serde(rename = "Encrypt")]
+    encrypt: CDATA,
+    #[serde(rename = "MsgSignature")]
+    signature: CDATA,
+    #[serde(rename = "TimeStamp")]
+    timestamp: String,
+    #[serde(rename = "Nonce")]
+    nonce: CDATA,
+}
+
+impl WXBizMsg4Send {
+    fn new(encrypt: &str, signature: &str, timestamp: &str, nonce: &str) -> WXBizMsg4Send {
+        WXBizMsg4Send {
+            xml_name: (),
+            encrypt: CDATA {
+                value: encrypt.to_string(),
+            },
+            signature: CDATA {
+                value: signature.to_string(),
+            },
+            timestamp: timestamp.to_string(),
+            nonce: CDATA {
+                value: nonce.to_string(),
+            },
+        }
+    }
+
+    fn serialize(&self) -> Result<String, CryptError> {
+        let xml_msg = serde_xml_rs::to_string(self)
+            .map_err(|err| CryptError::new(GEN_XML_ERROR, err.to_string()))?;
+        Ok(xml_msg)
+    }
+}
+
+const VALIDATE_SIGNATURE_ERROR: i32 = -40001;
+const PARSE_XML_ERROR: i32 = -40002;
+const COMPUTE_SIGNATURE_ERROR: i32 = -40003;
+const ILLEGAL_AES_KEY: i32 = -40004;
+const VALIDATE_CORPID_ERROR: i32 = -40005;
+const ENCRYPT_AES_ERROR: i32 = -40006;
+const DECRYPT_AES_ERROR: i32 = -40007;
+const ILLEGAL_BUFFER: i32 = -40008;
+const ENCODE_BASE64_ERROR: i32 = -40009;
+const DECODE_BASE64_ERROR: i32 = -40010;
+const GEN_XML_ERROR: i32 = -40010;
+const PARSE_JSON_ERROR: i32 = -40012;
+const GEN_JSON_ERROR: i32 = -40013;
+const ILLEGAL_PROTOCOL_TYPE: i32 = -40014;
+
+#[derive(Debug)]
+struct CryptError {
+    err_code: i32,
+    err_msg: String,
+}
+
+impl CryptError {
+    fn new(err_code: i32, err_msg: String) -> CryptError {
+        CryptError {
+            err_code,
+            err_msg: err_msg,
+        }
+    }
+}
+
 #[get("/callback")]
 async fn get_callback(
     botconf: web::Data<Arc<Mutex<BotConfig>>>,
@@ -121,13 +195,11 @@ async fn get_callback(
     let botconf = botconf.lock().unwrap();
     let wxw = WXWork {
         sys: botconf.sys.clone(),
-        signature: &qs.msg_signature,
         timestamps: &qs.timestamp,
         nonce: &qs.nonce,
-        msg_encrypt: &qs.echostr.unwrap(),
         _tag: PhantomData::default(),
     };
-    let msg = wxw.decrypt();
+    let msg = wxw.decrypt(&qs.msg_signature, &qs.echostr.unwrap());
     if msg.is_err() {
         return HttpResponse::BadRequest().body(msg.unwrap_err());
     }
@@ -232,10 +304,8 @@ fn rand_str(n: usize) -> String {
 #[derive(Debug)]
 struct WXWork<'a, 'b> {
     sys: Sys,
-    signature: &'a str,
     timestamps: &'a str,
     nonce: &'a str,
-    msg_encrypt: &'a str,
     _tag: PhantomData<&'b str>,
 }
 
@@ -274,43 +344,18 @@ impl<'a, 'b> WXWork<'a, 'b> {
         signature_calculated
     }
 
-    pub fn decrypt(&self) -> Result<String, &'b str> {
-        let signature_calculated = self.get_sign(self.msg_encrypt);
-
-        // // Sort the parameters in dictionary order and concatenate them into a single string.
-        // let mut params = vec![
-        //     ("token", self.sys.token.as_str()),
-        //     ("timestamp", self.timestamps),
-        //     ("nonce", self.nonce),
-        //     ("msg_encrypt", self.msg_encrypt),
-        // ];
-        // params.sort_by(|a, b| a.1.cmp(b.1));
-        // let sorted_params: String = params
-        //     .iter()
-        //     .map(|(key, value)| format!("{}", value))
-        //     .collect();
-
-        // println!("sorted_params: {}", sorted_params);
-
-        // // Calculate the SHA1 hash of the sorted parameters string.
-        // let mut hasher = Sha1::new();
-        // hasher.update(sorted_params.as_bytes());
-        // let sha1_hash = hasher.finalize();
-        // println!("sha1_hash: {:?}", sha1_hash);
-
-        // // Convert the SHA1 hash to a hexadecimal string.
-        // let signature_calculated = format!("{:x}", sha1_hash);
-        // println!("signature_calculated: {}", signature_calculated);
+    pub fn decrypt(&self, signature: &str, data: &str) -> Result<String, &'b str> {
+        let signature_calculated = self.get_sign(data);
 
         // Compare the calculated signature with the provided signature.
-        if signature_calculated == self.signature {
+        if signature_calculated == signature {
             println!("Signature is valid!");
         } else {
             return Err("Signature is invalid!");
         }
 
         // Decode the base64-encoded AES message.
-        let aes_msg = base64_decode(self.msg_encrypt);
+        let aes_msg = base64_decode(data);
         println!("aes_msg: {:?}", aes_msg);
         println!("aes_msg_cnt: {:?}", aes_msg.len());
 
@@ -354,7 +399,7 @@ impl<'a, 'b> WXWork<'a, 'b> {
         }
     }
 
-    pub fn encrypt(&self, reply_msg: String, ts: String, nonce: String) {
+    pub fn encrypt(&self, reply_msg: String) -> Result<String, CryptError> {
         let rand_str = rand_str(16);
 
         let mut buffer = Vec::new();
@@ -373,13 +418,15 @@ impl<'a, 'b> WXWork<'a, 'b> {
 
         let ciphertext = aes_encrypt(&pad_msg, &self.sys.aes_key.clone().unwrap());
 
-        let bytes = engine::GeneralPurpose::new(
+        let ciphertext = engine::GeneralPurpose::new(
             &alphabet::STANDARD,
             general_purpose::PAD.with_decode_allow_trailing_bits(true),
         )
         .encode(ciphertext);
 
-        let signature_calculated = self.get_sign(&bytes);
+        let signature = self.get_sign(&ciphertext);
+
+        WXBizMsg4Send::new(&ciphertext, &signature, &self.timestamps, &self.nonce).serialize()
     }
 }
 
@@ -405,13 +452,11 @@ async fn post_callback(
     let botconf = botconf.lock().unwrap();
     let wxw = WXWork {
         sys: botconf.sys.clone(),
-        signature: &qs.msg_signature,
         timestamps: &qs.timestamp,
         nonce: &qs.nonce,
-        msg_encrypt: &rd.Encrypt,
         _tag: PhantomData::default(),
     };
-    let msg = wxw.decrypt();
+    let msg = wxw.decrypt(&qs.msg_signature, &rd.Encrypt);
     if msg.is_err() {
         return HttpResponse::BadRequest().body(msg.unwrap_err());
     }
@@ -446,7 +491,15 @@ async fn post_callback(
             match get_posts(&botconf.mates.department, &date, &mates_post) {
                 Ok(res) => {
                     // TODO need to encrypt res to xml
-                    return HttpResponse::Ok().body(res);
+                    match wxw.encrypt(res) {
+                        Ok(x) => {
+                            return HttpResponse::Ok().body(x);
+                        }
+                        Err(e) => {
+                            return HttpResponse::Ok().body("hehe");
+                            // return HttpResponse::BadRequest().body(e);
+                        }
+                    };
                 }
                 Err(e) => {
                     return HttpResponse::BadRequest().body(e);
@@ -468,7 +521,16 @@ async fn post_callback(
         match get_posts(&botconf.mates.department, &date, &mates_post) {
             Ok(res) => {
                 // TODO need to encrypt res to xml
-                return HttpResponse::Ok().body(res);
+                // return HttpResponse::Ok().body(res);
+                match wxw.encrypt(res) {
+                    Ok(x) => {
+                        return HttpResponse::Ok().body(x);
+                    }
+                    Err(e) => {
+                        return HttpResponse::Ok().body("hehe");
+                        // return HttpResponse::BadRequest().body(e);
+                    }
+                };
             }
             Err(e) => {
                 return HttpResponse::BadRequest().body(e);
