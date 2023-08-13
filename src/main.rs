@@ -1,4 +1,5 @@
 use actix_web::{get, post, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
+
 use base64;
 use base64::{
     alphabet,
@@ -21,14 +22,17 @@ use byteorder::{BigEndian, WriteBytesExt};
 use chrono;
 use config;
 use rand::Rng;
+use std::io::Write;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time;
 
+const LETTER_BYTES: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const BLOCK_SIZE: usize = 32;
+
 type MatesPost = HashMap<String, HashMap<String, String>>;
 static DATE_FORMAT: &'static str = "%Y%m%d";
-const LETTER_BYTES: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 fn load_config() -> BotConfig {
     let mut settings = config::Config::default();
@@ -164,6 +168,17 @@ fn aes_decrypt(encrypted_data: &[u8], key: &[u8]) -> Vec<u8> {
     plaintext.to_vec()
 }
 
+fn pkcs7_padding(plaintext: Vec<u8>, block_size: usize) -> Vec<u8> {
+    let padding = block_size - (plaintext.len() % block_size);
+    let padtext = vec![padding as u8; padding];
+    let mut buffer = Vec::with_capacity(plaintext.len() + padding);
+
+    buffer.write_all(&plaintext).unwrap();
+    buffer.write_all(&padtext).unwrap();
+
+    buffer
+}
+
 fn pkcs7_unpadding(mut plaintext: Vec<u8>, block_size: usize) -> Result<Vec<u8>, &'static str> {
     let plaintext_len = plaintext.len();
 
@@ -231,13 +246,13 @@ impl<'a, 'b> WXWork<'a, 'b> {
         base64_decode(&encoding_aes_key)
     }
 
-    pub fn decrypt(&self) -> Result<String, &'b str> {
+    pub fn get_sign(&self, data: &str) -> String {
         // Sort the parameters in dictionary order and concatenate them into a single string.
         let mut params = vec![
             ("token", self.sys.token.as_str()),
             ("timestamp", self.timestamps),
             ("nonce", self.nonce),
-            ("msg_encrypt", self.msg_encrypt),
+            ("msg_encrypt", data),
         ];
         params.sort_by(|a, b| a.1.cmp(b.1));
         let sorted_params: String = params
@@ -256,6 +271,36 @@ impl<'a, 'b> WXWork<'a, 'b> {
         // Convert the SHA1 hash to a hexadecimal string.
         let signature_calculated = format!("{:x}", sha1_hash);
         println!("signature_calculated: {}", signature_calculated);
+        signature_calculated
+    }
+
+    pub fn decrypt(&self) -> Result<String, &'b str> {
+        let signature_calculated = self.get_sign(self.msg_encrypt);
+
+        // // Sort the parameters in dictionary order and concatenate them into a single string.
+        // let mut params = vec![
+        //     ("token", self.sys.token.as_str()),
+        //     ("timestamp", self.timestamps),
+        //     ("nonce", self.nonce),
+        //     ("msg_encrypt", self.msg_encrypt),
+        // ];
+        // params.sort_by(|a, b| a.1.cmp(b.1));
+        // let sorted_params: String = params
+        //     .iter()
+        //     .map(|(key, value)| format!("{}", value))
+        //     .collect();
+
+        // println!("sorted_params: {}", sorted_params);
+
+        // // Calculate the SHA1 hash of the sorted parameters string.
+        // let mut hasher = Sha1::new();
+        // hasher.update(sorted_params.as_bytes());
+        // let sha1_hash = hasher.finalize();
+        // println!("sha1_hash: {:?}", sha1_hash);
+
+        // // Convert the SHA1 hash to a hexadecimal string.
+        // let signature_calculated = format!("{:x}", sha1_hash);
+        // println!("signature_calculated: {}", signature_calculated);
 
         // Compare the calculated signature with the provided signature.
         if signature_calculated == self.signature {
@@ -278,8 +323,7 @@ impl<'a, 'b> WXWork<'a, 'b> {
         // Decrypt the AES message using the AES key.
         let mut rand_msg = aes_decrypt(&aes_msg, &self.sys.aes_key.clone().unwrap());
 
-        let blocksize = 32;
-        match pkcs7_unpadding(rand_msg, blocksize) {
+        match pkcs7_unpadding(rand_msg, BLOCK_SIZE) {
             Ok(res) => {
                 rand_msg = res;
             }
@@ -310,23 +354,33 @@ impl<'a, 'b> WXWork<'a, 'b> {
         }
     }
 
-    // pub fn encrypt(&self, reply_msg: String, ts: String, nonce: String) {
-    //     let rand_str = rand_str(16);
+    pub fn encrypt(&self, reply_msg: String, ts: String, nonce: String) {
+        let rand_str = rand_str(16);
 
-    //     let mut buffer = Vec::new();
-    //     buffer.extend_from_slice(rand_str.as_bytes());
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(rand_str.as_bytes());
 
-    //     let mut msg_len_buf = vec![0; 4];
-    //     (&mut msg_len_buf[..])
-    //         .write_u32::<BigEndian>(reply_msg.len() as u32)
-    //         .unwrap();
-    //     buffer.extend_from_slice(&msg_len_buf);
+        let mut msg_len_buf = vec![0; 4];
+        (&mut msg_len_buf[..])
+            .write_u32::<BigEndian>(reply_msg.len() as u32)
+            .unwrap();
+        buffer.extend_from_slice(&msg_len_buf);
 
-    //     buffer.extend_from_slice(reply_msg.as_bytes());
-    //     buffer.extend_from_slice(self.receiver_id.as_bytes());
+        buffer.extend_from_slice(reply_msg.as_bytes());
+        buffer.extend_from_slice(self.sys.corp_id.as_bytes());
 
-    //     // buffer
-    // }
+        let pad_msg = pkcs7_padding(buffer, BLOCK_SIZE);
+
+        let ciphertext = aes_encrypt(&pad_msg, &self.sys.aes_key.clone().unwrap());
+
+        let bytes = engine::GeneralPurpose::new(
+            &alphabet::STANDARD,
+            general_purpose::PAD.with_decode_allow_trailing_bits(true),
+        )
+        .encode(ciphertext);
+
+        let signature_calculated = self.get_sign(&bytes);
+    }
 }
 
 #[post("/callback")]
