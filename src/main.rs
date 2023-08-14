@@ -40,7 +40,8 @@ fn load_config() -> BotConfig {
     settings
         .merge(config::Environment::new().prefix("APP"))
         .unwrap();
-    settings.merge(config::File::with_name("config")).unwrap();
+    let conf_path = settings.get_str("conf_path").unwrap();
+    settings.merge(config::File::with_name(&conf_path)).unwrap();
     let mut botconf: BotConfig = settings.clone().try_into().unwrap();
     botconf.sys.aes_key = Some(WXWork::decode_aes_key(&botconf.sys.enc_aes_key));
     botconf
