@@ -1,3 +1,4 @@
+use actix_web::body::BoxBody;
 use actix_web::{get, post, web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 
 use base64;
@@ -162,7 +163,7 @@ const PARSE_JSON_ERROR: i32 = -40012;
 const GEN_JSON_ERROR: i32 = -40013;
 const ILLEGAL_PROTOCOL_TYPE: i32 = -40014;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct CryptError {
     err_code: i32,
     err_msg: String,
@@ -170,10 +171,7 @@ struct CryptError {
 
 impl CryptError {
     fn new(err_code: i32, err_msg: String) -> CryptError {
-        CryptError {
-            err_code,
-            err_msg: err_msg,
-        }
+        CryptError { err_code, err_msg }
     }
 }
 
@@ -426,7 +424,7 @@ impl<'a, 'b> WXWork<'a, 'b> {
 
         let signature = self.get_sign(&ciphertext);
 
-        WXBizMsg4Send::new(&ciphertext, &signature, &self.timestamps, &self.nonce).serialize()
+        Ok(format!("<xml><Encrypt><![CDATA[{}]]></Encrypt><MsgSignature><![CDATA[{}]]></MsgSignature><TimeStamp>{}</TimeStamp><Nonce><![CDATA[{}]]></Nonce></xml>", ciphertext, signature, self.timestamps, self.nonce))
     }
 }
 
@@ -490,26 +488,17 @@ async fn post_callback(
         if content.contains(&date) {
             match get_posts(&botconf.mates.department, &date, &mates_post) {
                 Ok(res) => {
-                    // TODO need to encrypt res to xml
-                    match wxw.encrypt(res) {
-                        Ok(x) => {
-                            return HttpResponse::Ok().body(x);
-                        }
-                        Err(e) => {
-                            return HttpResponse::Ok().body("hehe");
-                            // return HttpResponse::BadRequest().body(e);
-                        }
-                    };
+                    return send_http(&wxw, res);
                 }
                 Err(e) => {
-                    return HttpResponse::BadRequest().body(e);
+                    return send_http(&wxw, e.to_string());
                 }
             };
         }
     }
 
     if !botconf.mates.name.contains(mate_name) {
-        return HttpResponse::BadRequest().body(format!("{} is not our mates", mate_name));
+        return send_http(&wxw, format!("{} is not our mates", mate_name));
     }
 
     mates_post
@@ -520,25 +509,26 @@ async fn post_callback(
     if mates_post.get(&date).unwrap().len() == botconf.mates.name.len() {
         match get_posts(&botconf.mates.department, &date, &mates_post) {
             Ok(res) => {
-                // TODO need to encrypt res to xml
-                // return HttpResponse::Ok().body(res);
-                match wxw.encrypt(res) {
-                    Ok(x) => {
-                        return HttpResponse::Ok().body(x);
-                    }
-                    Err(e) => {
-                        return HttpResponse::Ok().body("hehe");
-                        // return HttpResponse::BadRequest().body(e);
-                    }
-                };
+                return send_http(&wxw, res);
             }
             Err(e) => {
-                return HttpResponse::BadRequest().body(e);
+                return send_http(&wxw, e.to_string());
             }
         };
     }
 
-    HttpResponse::Ok().body(format!("Thank you, {}", mate_name))
+    send_http(&wxw, format!("Thank you, {}", mate_name))
+}
+
+fn send_http(wxw: &WXWork, res: String) -> HttpResponse<BoxBody> {
+    match wxw.encrypt(res) {
+        Ok(x) => {
+            return HttpResponse::Ok().body(x);
+        }
+        Err(e) => {
+            return HttpResponse::BadRequest().json(e);
+        }
+    };
 }
 
 fn get_posts(department: &str, date: &str, mates_post: &MatesPost) -> Result<String, &'static str> {
