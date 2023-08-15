@@ -10,11 +10,11 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command: ["/app/target/release/wxbot-rs"]
     networks:
-      airnet:
-        ipv4_address: 10.90.0.3
+      botnet:
+        ipv4_address: 172.20.20.2
 
 networks:
-  airnet:
+  botnet:
     driver: bridge
     ipam:
       config:
