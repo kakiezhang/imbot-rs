@@ -1,5 +1,3 @@
-[web]
-port = 9000
 [sys]
 corp_id = "wx5823bf96d3bd56c7"
 token = "QDG6eK"

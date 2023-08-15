@@ -73,7 +73,7 @@ pub struct Sys {
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct BotConfig {
-    pub web: Web,
+    pub web_port: i32,
     pub sys: Sys,
     pub mates: Mates,
     pub adm: Admin,
@@ -551,7 +551,10 @@ async fn main() -> std::io::Result<()> {
     let mates_post = Arc::new(Mutex::new(mates_post));
 
     let config = load_config();
-    let webport = config.web.port;
+    let webport = config.web_port;
+    if webport <= 1024 {
+        panic!("web port must be greater than 1024.");
+    }
     let shared_config = Arc::new(Mutex::new(config));
     let shared_config_clone = shared_config.clone();
 
@@ -571,7 +574,7 @@ async fn main() -> std::io::Result<()> {
             .service(get_callback)
             .service(post_callback)
     })
-    .bind(format!("0.0.0.0:{:?}", webport))?
+    .bind(format!("0.0.0.0:{}", webport))?
     .run()
     .await
 }

@@ -1,0 +1,22 @@
+services:
+  wxbot:
+    image: localhost/kakie/wxbot-rs:dev
+    container_name: wxbot
+    environment:
+      APP_CONF_PATH: /app/prod_config.toml
+      APP_WEB_PORT: 9000
+    ports:
+      - "9000:9000"
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["/app/target/release/wxbot-rs"]
+    networks:
+      airnet:
+        ipv4_address: 10.90.0.3
+
+networks:
+  airnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.20.0/28
+          gateway: 172.20.20.1
